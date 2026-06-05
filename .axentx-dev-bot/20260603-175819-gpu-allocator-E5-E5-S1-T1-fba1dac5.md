@@ -738,97 +738,103 @@ RETRY (1/8): LLM failed: Remote end closed connection without response
 
 RETRY (2/8): LLM failed: Remote end closed connection without response
 
-## qa — qa @ 2026-06-05T01:25:03.336034Z
+## qa — qa @ 2026-06-05T04:06:01.098419Z
 
-PASS: Test plan for GPU Allocator Report Generation System
-
----
-
-### 1. Acceptance Criteria
-- **AC1:** Reports can be generated for any user‑specified start and end datetime (ISO‑8601) and must include all GPU allocation records within that interval.
-- **AC2:** The generated report contains columns: `timestamp`, `gpu_id`, `host_id`, `allocation_status`, `utilization_percent`, `job_id`.
-- **AC3:** Analytics dashboard displays total GPU hours, average utilization, peak utilization, and number of active jobs for the selected period.
-- **AC4:** Reports can be exported in **CSV**, **JSON**, and **PDF** formats; exported files must be downloadable via the API endpoint `/reports/export`.
-- **AC5:** Exported files must pass schema validation (CSV header order, JSON schema, PDF contains a table with the same data).
-- **AC6:** Unauthorized users receive HTTP 403 when attempting to generate or export a report.
-- **AC7:** Report generation completes within 5 seconds for up to 10,000 allocation records.
+PASS: TDD‑style test plan for GPU‑Allocator Report Generation System
 
 ---
 
-### 2. Unit Tests (pytest style)
+## 1. Acceptance Criteria  
+(Each bullet is measurable and directly maps to the PRD)
+
+| # | Criterion | Measurement |
+|---|-----------|-------------|
+| **AC1** | Reports can be generated for any user‑specified start and end datetime (ISO‑8601). | `generate(start, end)` returns a non‑empty collection when records exist in the interval; raises `ValueError` if `start > end`. |
+| **AC2** | Analytics dashboard displays total GPU hours, average utilization, peak utilization, and number of active jobs for the selected period. | Dashboard JSON contains keys `total_gpu_hours`, `avg_utilization`, `peak_utilization`, `active_jobs` with numeric values. |
+| **AC3** | Reports can be exported in CSV, JSON, and PDF formats. | `export(report, format)` returns a file path with extension matching the format and file size > 0. |
+| **AC4** | Exported files pass schema validation (CSV header order, JSON schema, PDF table). | Validation functions `validate_csv`, `validate_json`, `validate_pdf` return `True`. |
+| **AC5** | Unauthorized users receive HTTP 403 when attempting to generate or export a report. | API endpoint `/reports/generate` and `/reports/export` return status 403 for unauthenticated/unauthorized requests. |
+| **AC6** | Report generation completes within 5 seconds for up to 10 000 allocation records. | Execution time ≤ 5 s measured with `time.perf_counter()` for 10 000 synthetic records. |
+| **AC7** | No duplicate records are included in a report. | Count of unique `(timestamp, gpu_id, job_id)` tuples equals total rows returned. |
+
+---
+
+## 2. Unit Tests (pytest style)
 
 ```python
+# tests/test_generator.py
 import pytest
 from datetime import datetime, timedelta
-from reports.generator import ReportGenerator, ReportFormat, ReportSchemaError
+from reports.generator import (
+    ReportGenerator,
+    ReportFormat,
+    ReportSchemaError,
+    validate_csv,
+    validate_json,
+    validate_pdf,
+)
+from reports.dashboard import Dashboard
+from reports.api import generate_report_endpoint, export_report_endpoint
+from fastapi.testclient import TestClient
+from app.main import app  # FastAPI app
+
+client = TestClient(app)
 
 @pytest.fixture
 def sample_records():
-    # Returns a list of dicts mimicking DB rows
+    """Return 100 synthetic allocation records."""
     base = datetime(2024, 1, 1, 0, 0)
     return [
         {
             "timestamp": base + timedelta(minutes=i),
-            "gpu_id": f"gpu-{i%4}",
-            "host_id": f"host-{i%2}",
+            "gpu_id": f"gpu-{i % 4}",
+            "host_id": f"host-{i % 2}",
             "allocation_status": "allocated",
             "utilization_percent": 70 + i % 30,
-            "job_id": f"job-{i}"
+            "job_id": f"job-{i}",
         }
-        for i in range(100)   # 100 sample rows
+        for i in range(100)
     ]
+
 
 def test_generate_report_filters_by_time(sample_records):
     gen = ReportGenerator(records=sample_records)
     start = datetime(2024, 1, 1, 0, 30)
-    end   = datetime(2024, 1, 1, 1, 0)
+    end = datetime(2024, 1, 1, 1, 0)
     report = gen.generate(start, end)
     assert all(start <= r["timestamp"] <= end for r in report.data)
+    assert len(report.data) == 31  # 31 minutes inclusive
 
-def test_report_contains_all_required_columns(sample_records):
+
+def test_generate_report_invalid_interval(sample_records):
+    gen = ReportGenerator(records=sample_records)
+    with pytest.raises(ValueError):
+        gen.generate(datetime(2024, 1, 1, 2, 0), datetime(2024, 1, 1, 1, 0))
+
+
+def test_report_contains_required_columns(sample_records):
     gen = ReportGenerator(records=sample_records)
     report = gen.generate(datetime.min, datetime.max)
-    expected = {"timestamp", "gpu_id", "host_id",
-                "allocation_status", "utilization_percent", "job_id"}
+    expected = {
+        "timestamp",
+        "gpu_id",
+        "host_id",
+        "allocation_status",
+        "utilization_percent",
+        "job_id",
+    }
     assert set(report.data[0].keys()) == expected
+
 
 def test_export_csv_validates_schema(sample_records, tmp_path):
     gen = ReportGenerator(records=sample_records)
     report = gen.generate(datetime.min, datetime.max)
     csv_path = tmp_path / "report.csv"
     gen.export(report, ReportFormat.CSV, csv_path)
-    # simple header check
-    with open(csv_path) as f:
-        header = f.readline().strip()
-    assert header == "timestamp,gpu_id,host_id,allocation_status,utilization_percent,job_id"
+    assert csv_path.exists()
+    assert csv_path.stat().st_size > 0
+    assert validate_csv(csv_path)
 
-def test_export_json_schema(sample_records, tmp_path):
-    gen = ReportGenerator(records=sample_records)
-    report = gen.generate(datetime.min, datetime.max)
-    json_path = tmp_path / "report.json"
-    gen.export(report, ReportFormat.JSON, json_path)
-    import json, jsonschema
-    with open(json_path) as f:
-        data = json.load(f)
-    # validate against a minimal schema
-    schema = {
-        "type": "array",
-        "items": {"type": "object",
-                  "required": ["timestamp","gpu_id","host_id",
-                               "allocation_status","utilization_percent","job_id"]}}
-    jsonschema.validate(data, schema)
 
-def test_export_pdf_contains_table(sample_records, tmp_path):
-    gen = ReportGenerator(records=sample_records)
-    report = gen.generate(datetime.min, datetime.max)
-    pdf_path = tmp_path / "report.pdf"
-    gen.export(report, ReportFormat.PDF, pdf_path)
-    # Use pdfminer.six to extract text and verify column headers appear
-    from pdfminer.high_level import extract_text
-    text = extract_text(pdf_path)
-    for col in ["timestamp", "gpu_id", "host_id", "allocation_status",
-                "utilization_percent", "job_id"]:
-        assert col in text
-
-def test_invalid_time_range_raises():
-    gen = ReportGenerat
+def test_export_json_validates_schema(sample_records, tmp_path):
+    gen = ReportGenerator(records=sample_r
