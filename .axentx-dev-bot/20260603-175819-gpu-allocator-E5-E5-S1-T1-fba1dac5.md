@@ -738,58 +738,77 @@ RETRY (1/8): LLM failed: Remote end closed connection without response
 
 RETRY (2/8): LLM failed: Remote end closed connection without response
 
-## qa — qa @ 2026-06-04T22:55:54.604220Z
+## qa — qa @ 2026-06-05T00:16:00.958301Z
 
-<think>
-Okay, let's tackle this QA test plan for the gpu-allocator project. The task is to implement a report generation system based on the approved PRD. The acceptance criteria are three main points: generating reports for specific time periods, having an easy-to-understand dashboard, and exporting reports in various formats. 
+PASS: Test plan for GPU Allocator Report Generation System
 
-First, I need to outline the acceptance criteria in measurable terms. For time-based reports, I should check if the start and end times are correctly applied. The dashboard needs to have specific widgets like usage charts and system stats. Export formats should include PDF, CSV, and JSON.
+---
 
-Next, unit tests. The generator.py likely has functions for generating reports, creating dashboards, and exporting. I'll write tests for each function. For example, test_generate_report_with_time_range would verify that the report's data is filtered correctly. Mocking the data source might be necessary here. Then, test_dashboard_rendering checks if the dashboard has the right components. For exports, test_export_formats would assert the correct file types are generated.
+### 1. Acceptance Criteria
+- **AC1:** Reports can be generated for any user‑specified start and end datetime (ISO‑8601) and must include all GPU allocation records within that interval.
+- **AC2:** The generated report contains columns: `timestamp`, `gpu_id`, `host_id`, `allocation_status`, `utilization_percent`, `job_id`.
+- **AC3:** Analytics dashboard displays total GPU hours, average utilization, peak utilization, and number of active jobs for the selected period.
+- **AC4:** Reports can be exported in **CSV**, **JSON**, and **PDF** formats; exported files must be downloadable via the API endpoint `/reports/export`.
+- **AC5:** Exported files must pass schema validation (CSV header order, JSON schema, PDF contains a table with the same data).
+- **AC6:** Unauthorized users receive HTTP 403 when attempting to generate or export a report.
+- **AC7:** Report generation completes within 5 seconds for up to 10,000 allocation records.
 
-Integration tests need to cover happy paths and edge cases. Happy cases include generating a report for a valid time range and exporting in all formats. Edge cases might be overlapping time ranges, invalid formats, or empty data. For example, if the start time is after the end time, the system should handle that error. Also, if there's no data in the requested period, the report should reflect that.
+---
 
-The risk register should list potential issues. Security warnings from the reviewer are a concern—maybe the export function has vulnerabilities. Also, time zone handling could cause incorrect reports. Dashboard rendering might have layout issues on different screen sizes. Export formats might not be properly validated, leading to errors. These risks can be detected through code reviews, time zone testing, UI testing, and format validation checks.
+### 2. Unit Tests (pytest style)
 
-I need to make sure the tests are TDD-style, starting with the smallest units and moving to integration. Also, considering the existing portfolio, I should avoid duplicating tests from other projects. The security warnings mentioned in the reviewer notes should be addressed in the risk register, perhaps by suggesting security testing for the export functions.
-</think>
-
-PASS: Test plan aligns with PRD requirements and addresses security concerns through validation and error handling.
-
-1. **Acceptance criteria**  
-   - [ ] Reports filter data accurately by specified start/end timestamps (±1s tolerance)  
-   - [ ] Dashboard contains 3+ interactive widgets: GPU utilization chart, system stats table, cost breakdown pie chart  
-   - [ ] Export generates non-zero files in PDF, CSV, and JSON formats with correct MIME types  
-
-2. **Unit tests** (Python/pytest)  
 ```python
-def test_generate_report_with_time_range():
-    start = datetime(2026, 5, 1)
-    end = datetime(2026, 5, 2)
-    report = ReportGenerator().generate(start, end)
-    assert all(start <= entry["timestamp"] <= end for entry in report.data)
-    
-def test_dashboard_rendering():
-    dashboard = DashboardRenderer().render()
-    assert len(dashboard.widgets) >= 3
-    assert isinstance(dashboard.widgets[0], LineChart)
-    assert "GPU Utilization (%)" in dashboard.widgets[0].title
+import pytest
+from datetime import datetime, timedelta
+from reports.generator import ReportGenerator, ReportFormat, ReportSchemaError
 
-def test_export_format_validation():
-    with pytest.raises(InvalidFormatError):
-        ReportExporter().export("invalid_format")
-```
+@pytest.fixture
+def sample_records():
+    base = datetime(2024, 1, 1, 0, 0)
+    return [
+        {
+            "timestamp": base + timedelta(minutes=i),
+            "gpu_id": f"gpu-{i%4}",
+            "host_id": f"host-{i%2}",
+            "allocation_status": "allocated",
+            "utilization_percent": 70 + i % 30,
+            "job_id": f"job-{i}"
+        }
+        for i in range(100)
+    ]
 
-3. **Integration tests**  
-**Happy path:**  
-- Generate 24hr report with 1000+ data points → validates time filtering  
-- Export CSV → verify first row contains "GPU_ID,Utilization,Cost" headers  
-- PDF export → check document contains "Generated by GPU Allocator v2.1" footer  
+def test_generate_report_filters_by_time(sample_records):
+    gen = ReportGenerator(records=sample_records)
+    start = datetime(2024, 1, 1, 0, 30)
+    end   = datetime(2024, 1, 1, 1, 0)
+    report = gen.generate(start, end)
+    assert all(start <= r["timestamp"] <= end for r in report.data)
 
-**Edge cases:**  
-- Overlapping time ranges (start > end) → returns empty report with warning  
-- Requesting export format with spaces ("txt ") → rejects with 400 Bad Request  
-- Empty time range (start=end) → generates "No data available" report  
+def test_report_contains_all_required_columns(sample_records):
+    gen = ReportGenerator(records=sample_records)
+    report = gen.generate(datetime.min, datetime.max)
+    expected = {"timestamp", "gpu_id", "host_id",
+                "allocation_status", "utilization_percent", "job_id"}
+    assert set(report.data[0].keys()) == expected
 
-4. **Risk register**  
-| Ri
+def test_export_csv_validates_schema(sample_records, tmp_path):
+    gen = ReportGenerator(records=sample_records)
+    report = gen.generate(datetime.min, datetime.max)
+    csv_path = tmp_path / "report.csv"
+    report.export(ReportFormat.CSV, csv_path)
+    # Validate CSV header order
+    with open(csv_path) as f:
+        header = f.readline().strip().split(',')
+    assert header == ["timestamp", "gpu_id", "host_id", "allocation_status", "utilization_percent", "job_id"]
+
+def test_export_json_validates_schema(sample_records, tmp_path):
+    gen = ReportGenerator(records=sample_records)
+    report = gen.generate(datetime.min, datetime.max)
+    json_path = tmp_path / "report.json"
+    report.export(ReportFormat.JSON, json_path)
+    import json
+    with open(json_path) as f:
+        data = json.load(f)
+    # Validate JSON schema: list of objects with required keys
+    assert isinstance(data, list)
+    assert all(set(item.keys()) == {"timestamp", "gpu_id", "host_id", "allocation_status", "utilization_percent", "job
