@@ -738,7 +738,7 @@ RETRY (1/8): LLM failed: Remote end closed connection without response
 
 RETRY (2/8): LLM failed: Remote end closed connection without response
 
-## qa — qa @ 2026-06-05T00:16:00.958301Z
+## qa — qa @ 2026-06-05T01:25:03.336034Z
 
 PASS: Test plan for GPU Allocator Report Generation System
 
@@ -764,6 +764,7 @@ from reports.generator import ReportGenerator, ReportFormat, ReportSchemaError
 
 @pytest.fixture
 def sample_records():
+    # Returns a list of dicts mimicking DB rows
     base = datetime(2024, 1, 1, 0, 0)
     return [
         {
@@ -774,7 +775,7 @@ def sample_records():
             "utilization_percent": 70 + i % 30,
             "job_id": f"job-{i}"
         }
-        for i in range(100)
+        for i in range(100)   # 100 sample rows
     ]
 
 def test_generate_report_filters_by_time(sample_records):
@@ -795,20 +796,39 @@ def test_export_csv_validates_schema(sample_records, tmp_path):
     gen = ReportGenerator(records=sample_records)
     report = gen.generate(datetime.min, datetime.max)
     csv_path = tmp_path / "report.csv"
-    report.export(ReportFormat.CSV, csv_path)
-    # Validate CSV header order
+    gen.export(report, ReportFormat.CSV, csv_path)
+    # simple header check
     with open(csv_path) as f:
-        header = f.readline().strip().split(',')
-    assert header == ["timestamp", "gpu_id", "host_id", "allocation_status", "utilization_percent", "job_id"]
+        header = f.readline().strip()
+    assert header == "timestamp,gpu_id,host_id,allocation_status,utilization_percent,job_id"
 
-def test_export_json_validates_schema(sample_records, tmp_path):
+def test_export_json_schema(sample_records, tmp_path):
     gen = ReportGenerator(records=sample_records)
     report = gen.generate(datetime.min, datetime.max)
     json_path = tmp_path / "report.json"
-    report.export(ReportFormat.JSON, json_path)
-    import json
+    gen.export(report, ReportFormat.JSON, json_path)
+    import json, jsonschema
     with open(json_path) as f:
         data = json.load(f)
-    # Validate JSON schema: list of objects with required keys
-    assert isinstance(data, list)
-    assert all(set(item.keys()) == {"timestamp", "gpu_id", "host_id", "allocation_status", "utilization_percent", "job
+    # validate against a minimal schema
+    schema = {
+        "type": "array",
+        "items": {"type": "object",
+                  "required": ["timestamp","gpu_id","host_id",
+                               "allocation_status","utilization_percent","job_id"]}}
+    jsonschema.validate(data, schema)
+
+def test_export_pdf_contains_table(sample_records, tmp_path):
+    gen = ReportGenerator(records=sample_records)
+    report = gen.generate(datetime.min, datetime.max)
+    pdf_path = tmp_path / "report.pdf"
+    gen.export(report, ReportFormat.PDF, pdf_path)
+    # Use pdfminer.six to extract text and verify column headers appear
+    from pdfminer.high_level import extract_text
+    text = extract_text(pdf_path)
+    for col in ["timestamp", "gpu_id", "host_id", "allocation_status",
+                "utilization_percent", "job_id"]:
+        assert col in text
+
+def test_invalid_time_range_raises():
+    gen = ReportGenerat
