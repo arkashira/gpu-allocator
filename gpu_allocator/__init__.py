@@ -1,8 +1,9 @@
-# gpu_allocator/__init__.py
 """
-Axentx GPU Manager – core allocator implementation.
+GPU Allocator package.
+
+Provides a tiny FastAPI service that allocates GPU slots to incoming
+requests, validates input, enforces a ≤5 % error‑margin between the
+requested and granted GPU count and pushes real‑time allocation updates
+over a WebSocket.
 """
-
-from .allocator import GpuAllocator
-
-__all__ = ["GpuAllocator"]
+__all__ = ["engine", "models", "api"]
